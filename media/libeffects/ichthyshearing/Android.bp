@@ -1,0 +1,73 @@
+// IchthysOS hearing-compensation effect: per-ear 8-band EQ for the global output mix.
+package {
+    default_applicable_licenses: ["Android-Apache-2.0"],
+}
+
+cc_library {
+    name: "libichthyshearing",
+
+    vendor: true,
+    srcs: ["EffectIchthysHearing.cpp"],
+
+    cflags: [
+        "-O2",
+        "-fvisibility=hidden",
+
+        "-Wall",
+        "-Werror",
+    ],
+
+    shared_libs: [
+        "libcutils",
+        "liblog",
+    ],
+
+    // audioserver is 64-bit but the HIDL effect wrapper is still pulled into 32-bit clients on
+    // this target, and /vendor/lib/soundfx has to carry a copy for them.
+    compile_multilib: "both",
+    relative_install_path: "soundfx",
+
+    header_libs: ["libaudioeffects"],
+}
+
+// Host test: drives the effect through its real command interface and measures the frequency
+// response it actually produces. Run with
+//   m ichthyshearing_response_test && out/host/linux-x86/nativetest64/ichthyshearing_response_test/ichthyshearing_response_test
+cc_test_host {
+    name: "ichthyshearing_response_test",
+
+    srcs: [
+        "EffectIchthysHearing.cpp",
+        "tests/response_test.cpp",
+    ],
+
+    local_include_dirs: ["."],
+
+    cflags: [
+        "-Wall",
+        "-Werror",
+    ],
+
+    shared_libs: [
+        "libcutils",
+        "liblog",
+    ],
+
+    header_libs: ["libaudioeffects"],
+
+    // Host-only sanity check; no reason to also build a 32-bit host variant of it.
+    compile_multilib: "64",
+
+    sanitize: {
+        address: true,
+        undefined: true,
+        diag: {
+            undefined: true,
+        },
+    },
+
+    gtest: false,
+    test_options: {
+        unit_test: true,
+    },
+}
