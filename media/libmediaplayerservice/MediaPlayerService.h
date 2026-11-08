@@ -254,6 +254,10 @@ public:
 
     virtual sp<IMediaCodecList> getCodecList() const;
 
+    // IchthysOS: also takes Ichthys Guard's network deny set from system_server.
+    virtual status_t            onTransact(uint32_t code, const Parcel& data, Parcel* reply,
+                                           uint32_t flags = 0);
+
     virtual sp<IRemoteDisplay> listenForRemoteDisplay(const String16 &opPackageName,
             const sp<IRemoteDisplayClient>& client, const String8& iface);
     virtual status_t            dump(int fd, const Vector<String16>& args);

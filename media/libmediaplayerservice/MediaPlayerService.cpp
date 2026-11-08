@@ -22,6 +22,9 @@
 #include <utils/Log.h>
 
 #include <chrono>
+#include <mutex>
+#include <set>
+#include <vector>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/time.h>
@@ -29,6 +32,7 @@
 #include <unistd.h>
 
 #include <string.h>
+#include <strings.h>
 
 #include <cutils/atomic.h>
 #include <cutils/properties.h> // for property_get
@@ -266,6 +270,28 @@ static bool checkPermission(const char* permissionString) {
     bool ok = checkCallingPermission(String16(permissionString));
     if (!ok) ALOGE("Request requires %s", permissionString);
     return ok;
+}
+
+// IchthysOS: the uids Ichthys Guard keeps off the network (its FIREWALL_CHAIN_OEM_DENY_3 set),
+// pushed by system_server (IchthysMediaFirewall) with this transaction. The RTSP client opens
+// its sockets in this process as uid media, which that per-uid firewall never matches, so the
+// URLs it serves are refused here instead for the uids on the set.
+static constexpr uint32_t kIchthysSetBlockedUids = IBinder::FIRST_CALL_TRANSACTION + 1000;
+static std::mutex sIchthysBlockedLock;
+static std::set<uid_t> sIchthysBlockedUids;
+
+static bool isIchthysBlockedUid(uid_t uid) {
+    std::lock_guard<std::mutex> lock(sIchthysBlockedLock);
+    return sIchthysBlockedUids.count(uid) != 0;
+}
+
+// The URLs NuPlayer plays with its RTSPSource (rtsp://, and http(s) .sdp), matched the way
+// NuPlayer::setDataSourceAsync matches them (case-insensitive).
+static bool isIchthysRtspUrl(const char* url) {
+    if (!strncasecmp(url, "rtsp://", 7)) return true;
+    if (strncasecmp(url, "http://", 7) && strncasecmp(url, "https://", 8)) return false;
+    const size_t len = strlen(url);
+    return (len >= 4 && !strcasecmp(".sdp", &url[len - 4])) || strstr(url, ".sdp?") != NULL;
 }
 
 static void dumpCodecDetails(int fd, const sp<IMediaCodecList> &codecList, bool queryDecoders) {
@@ -530,6 +556,31 @@ sp<IMediaPlayer> MediaPlayerService::create(const sp<IMediaPlayerClient>& client
 
 sp<IMediaCodecList> MediaPlayerService::getCodecList() const {
     return MediaCodecList::getLocalInstance();
+}
+
+status_t MediaPlayerService::onTransact(
+        uint32_t code, const Parcel& data, Parcel* reply, uint32_t flags)
+{
+    if (code == kIchthysSetBlockedUids) {
+        // IchthysOS: the whole Guard deny set, replacing the previous one. system_server only.
+        CHECK_INTERFACE(IMediaPlayerService, data, reply);
+        if (IPCThreadState::self()->getCallingUid() != AID_SYSTEM) {
+            return PERMISSION_DENIED;
+        }
+        std::vector<int32_t> uids;
+        status_t err = data.readInt32Vector(&uids);
+        if (err != OK) {
+            return err;
+        }
+        std::set<uid_t> blocked;
+        for (int32_t uid : uids) {
+            if (uid >= 0) blocked.insert(static_cast<uid_t>(uid));
+        }
+        std::lock_guard<std::mutex> lock(sIchthysBlockedLock);
+        sIchthysBlockedUids.swap(blocked);
+        return OK;
+    }
+    return BnMediaPlayerService::onTransact(code, data, reply, flags);
 }
 
 sp<IRemoteDisplay> MediaPlayerService::listenForRemoteDisplay(
@@ -1018,6 +1069,24 @@ status_t MediaPlayerService::Client::setDataSource(
     if ((strncmp(url, "http://", 7) == 0) ||
         (strncmp(url, "https://", 8) == 0) ||
         (strncmp(url, "rtsp://", 7) == 0)) {
+        if (!checkPermission("android.permission.INTERNET")) {
+            return PERMISSION_DENIED;
+        }
+    }
+
+    // IchthysOS: the RTSP client connects from this process (see isIchthysBlockedUid); an app
+    // that Ichthys Guard keeps off the network gets what an app without INTERNET gets. Both the
+    // player's creator and the caller count. Matched case-insensitively, as NuPlayer routes
+    // them, so "RTSP://" doesn't skip the INTERNET check above either.
+    if (isIchthysRtspUrl(url)) {
+        const uid_t creatorUid =
+                VALUE_OR_FATAL(aidl2legacy_int32_t_uid_t(mAttributionSource.uid));
+        const uid_t callingUid = IPCThreadState::self()->getCallingUid();
+        if (isIchthysBlockedUid(creatorUid) || isIchthysBlockedUid(callingUid)) {
+            ALOGW("setDataSource: RTSP refused for uid %d (Ichthys Guard network block)",
+                    (int) creatorUid);
+            return PERMISSION_DENIED;
+        }
         if (!checkPermission("android.permission.INTERNET")) {
             return PERMISSION_DENIED;
         }
